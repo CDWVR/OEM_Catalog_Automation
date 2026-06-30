@@ -1,0 +1,21 @@
+# Core dependencies
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+openpyxl>=3.1.0
+pandas>=2.0.0
+
+# Gemini AI SDK
+google-genai>=1.0.0
+
+# Web search (Layer 3 — primary: Exa; fallback: ddgs)
+exa-py>=1.0.0
+ddgs>=7.0.0
+
+# Optional: Advanced scraping (headless browser)
+# Requires additional setup: crawl4ai-setup
+crawl4ai>=0.8.0
+
+# PDF text extraction (legacy OEM documents)
+PyPDF2>=3.0.0
