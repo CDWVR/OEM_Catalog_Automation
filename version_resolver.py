@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from sources.endoflife_api import get_latest_cycle_version
-from version_utils import extract_version
+from version_utils import extract_version, mentions_version
 
 
 @dataclass
@@ -43,7 +43,10 @@ def prepare_query(product_name: str, oem: str, verbose: bool = True) -> Prepared
     version = extract_version(product_name)
     version_auto = False
 
-    if not version:
+    # Only assume "latest" when the user named no version at all. If the name carries a version we
+    # couldn't parse, guessing the newest release would return another version's dates with high
+    # confidence; searching without a version is the honest path.
+    if not version and not mentions_version(product_name):
         latest = get_latest_cycle_version(product_name)
         if latest:
             version = latest

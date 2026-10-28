@@ -13,7 +13,7 @@ from typing import Optional
 from datetime import datetime
 from models import ProductLifecycle
 from fuzzy_match import match_registry_value, normalize_key, phrase_matches
-from version_utils import extract_version
+from version_utils import extract_version, mentions_version, normalize_version, strip_trailing_version
 
 BASE_URL = "https://endoflife.date/api"
 
@@ -45,9 +45,9 @@ SLUG_MAP = {
     "mongodb": "mongodb",
     "redis": "redis",
     "mariadb": "mariadb",
-    "mssql": "mssql",
-    "sql server": "mssql",
-    "microsoft sql server": "mssql",
+    "mssql": "mssqlserver",
+    "sql server": "mssqlserver",
+    "microsoft sql server": "mssqlserver",
     "oracle database": "oracle-database",
     "couchbase": "couchbase-server",
     "neo4j": "neo4j",
@@ -56,7 +56,7 @@ SLUG_MAP = {
     "node.js": "nodejs",
     "node": "nodejs",
     "python": "python",
-    "java": "java",
+    "java": "oracle-jdk",
     "go": "go",
     "golang": "go",
     "ruby": "ruby",
@@ -143,11 +143,8 @@ def _get_all_slugs() -> list[str]:
 
 
 def _name_without_version(product_name: str) -> str:
-    """Strip trailing version tokens so slug lookup is not polluted (e.g. 9.0.22 -> 9022)."""
-    import re
-    name = re.sub(r"\s+v?\d+(?:\.\d+)*\s*$", "", product_name, flags=re.IGNORECASE).strip()
-    name = re.sub(r"\s+", " ", name)
-    return name
+    """Strip trailing version tokens so slug lookup is not polluted (e.g. 9.0.22 -> 9022, 2012 R2, 19c)."""
+    return strip_trailing_version(product_name)
 
 
 def _find_slug(product_name: str) -> Optional[str]:
@@ -163,7 +160,20 @@ def _find_slug(product_name: str) -> Optional[str]:
     return normalized.replace(" ", "-") if normalized else None
 
 
-def _find_cycle_for_version(cycles: list, version: str) -> Optional[dict]:
+# Products whose endoflife.date cycles use internal version numbers rather than the marketing names
+# people type. SQL Server's cycles are "15.0", "16.0"...; users ask for "SQL Server 2019".
+CYCLE_ALIASES = {
+    "mssqlserver": {"2012": "11.0", "2014": "12.0", "2016": "13.0", "2017": "14.0", "2019": "15.0", "2022": "16.0", "2025": "17.0"},
+}
+
+
+def _find_cycle_for_version(cycles: list, version: str, slug: Optional[str] = None) -> Optional[dict]:
+    version = CYCLE_ALIASES.get(slug or "", {}).get(version, version)
+    wanted = normalize_version(version)
+    # An exact match (including "2012 R2" == "2012-r2") always wins over a prefix match.
+    for cycle in cycles:
+        if normalize_version(str(cycle.get("cycle", ""))) == wanted:
+            return cycle
     for cycle in cycles:
         cycle_ver = str(cycle.get("cycle", ""))
         if not cycle_ver:
@@ -242,10 +252,15 @@ def search_endoflife(
         target_cycle = None
 
         if version:
-            target_cycle = _find_cycle_for_version(cycles, version)
+            target_cycle = _find_cycle_for_version(cycles, version, slug)
             if not target_cycle and version_was_requested:
                 print(f"    [endoflife.date] Version '{version}' not in catalog — skip Layer 1")
                 return None
+
+        if not target_cycle and mentions_version(product_name):
+            # The name carries a version we couldn't match: never substitute the latest release's dates.
+            print(f"    [endoflife.date] Version in '{product_name}' not recognised — skip Layer 1")
+            return None
 
         if not target_cycle:
             target_cycle = cycles[0]
