@@ -269,7 +269,7 @@ def query(
         print(f"\n{'-' * 60}")
         print(f"  Querying: {product_name} | {oem}" + (f" (v{version})" if version else ""))
         if prep.version_auto_resolved:
-            print(f"  (latest version auto-resolved)")
+            print("  (latest version auto-resolved)")
         print(f"{'-' * 60}")
 
     # -- Layer 0: Cache --
@@ -363,7 +363,7 @@ def query(
 
         if not ranked_candidates:
             if verbose:
-                print(f"    [X] Product not found on any crawled page.")
+                print("    [X] Product not found on any crawled page.")
         else:
             if verbose:
                 print(f"    {len(ranked_candidates)} pages eligible — extracting...")
@@ -394,7 +394,7 @@ def query(
                     if accept_as_found(extraction, CONFIDENCE_THRESHOLD):
                         break
                 elif verbose:
-                    print(f"      [X] Rejected")
+                    print("      [X] Rejected")
 
             if best_result:
                 accepted = _return_if_acceptable(
@@ -516,7 +516,7 @@ def query(
                     if accepted:
                         return accepted
             elif verbose:
-                print(f"      [X] Rejected")
+                print("      [X] Rejected")
 
         if best_web_result:
             accepted = _return_if_acceptable(
