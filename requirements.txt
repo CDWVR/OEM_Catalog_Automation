@@ -15,7 +15,7 @@ ddgs>=7.0.0
 
 # Optional: Advanced scraping (headless browser)
 # Requires additional setup: crawl4ai-setup
-crawl4ai>=0.8.0
+crawl4ai>=0.9.5
 
 # PDF text extraction (legacy OEM documents).
 # pypdf replaces the deprecated PyPDF2, which will not receive security fixes
