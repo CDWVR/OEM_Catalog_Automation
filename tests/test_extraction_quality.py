@@ -11,9 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # extractor imports google-genai at module load; tests never call the API.
 if "google.genai" not in sys.modules:
-    try:
-        import google.genai  # noqa: F401
-    except ImportError:
+    import importlib.util
+    if importlib.util.find_spec("google") is None or importlib.util.find_spec("google.genai") is None:
         google_pkg = sys.modules.setdefault("google", types.ModuleType("google"))
         genai_stub = types.ModuleType("google.genai")
         genai_stub.Client = object
