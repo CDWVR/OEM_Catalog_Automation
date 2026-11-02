@@ -4,7 +4,6 @@ from OEM site terminology (e.g. 'Alias Design 2021' vs 'Autodesk Alias').
 """
 
 import re
-from typing import Optional
 
 # (oem_substring, product_pattern) -> list of alternate search phrases (lowercase keys on OEM)
 # product_pattern is matched case-insensitively as substring of query product name

@@ -17,5 +17,9 @@ ddgs>=7.0.0
 # Requires additional setup: crawl4ai-setup
 crawl4ai>=0.8.0
 
-# PDF text extraction (legacy OEM documents)
-PyPDF2>=3.0.0
+# PDF text extraction (legacy OEM documents).
+# pypdf replaces the deprecated PyPDF2, which will not receive security fixes
+# (e.g. CVE-2023-36464, infinite loop on crafted PDFs).
+pypdf>=6.1.3
+
+# Dev only: render_workflow_png.py needs `playwright` (not required at runtime).

@@ -4,15 +4,18 @@ POC for catalog enrichment: given **product name + OEM**, return end-of-support,
 
 ## Setup
 
-```powershell
-cd lifecycle_poc_v2
-.\venv\Scripts\activate
+```bash
+cd OEM_Catalog_Automation
+python -m venv venv
+source venv/bin/activate          # Windows: .\venv\Scripts\activate
 pip install -r requirements.txt
-copy .env.example .env
+cp .env.example .env              # Windows: copy .env.example .env
 # Edit .env — add GEMINI_API_KEY and EXA_API_KEY (see Layer 3 search below).
 ```
 
-Run any command once to init DB and seed hubs: `.\venv\Scripts\python.exe main.py stats`
+Run any command once to init DB and seed hubs: `python main.py stats`
+
+Run the offline tests: `python -m unittest discover -s tests`
 
 ## Commands
 
@@ -42,8 +45,8 @@ Run any command once to init DB and seed hubs: `.\venv\Scripts\python.exe main.p
 
 | Step | Source | Notes |
 |------|--------|--------|
-| 1 | SQLite `search_cache` | Reuse URLs for 7 days (default) |
-| 2 | `discovered_urls` (crawl) | Free — run `crawl --all` first |
+| 1 | `discovered_urls` (crawl) | Free — re-ranked every query; URLs Layer 2 already tried are skipped |
+| 2 | SQLite `search_cache` | Web-search URLs reused for 7 days (default) |
 | 3 | **Exa** | `EXA_API_KEY` — OEM `include_domains` filtering |
 | 4 | DuckDuckGo / `ddgs` | Fallback only if Exa/crawl did not return enough URLs |
 
@@ -73,16 +76,23 @@ Use `EXA_SEARCH_TYPE=auto` for faster/cheaper searches; `deep` for harder lifecy
 
 Per URL: **PDF → Crawl4AI → Jina Reader → direct HTTP** (not the old direct-first order).
 
-## Layer 3: `stop_event` (early cancellation)
+## Layer 3: early cancellation
 
-**What it was:** `engine.py` created `threading.Event()` so scrape workers could stop early, but nothing ever called `stop_event.set()`. All 20 URLs were scraped even after a good answer was possible.
+After **3 pages** score ≥ 20 (product/version mention), `stop_event` is set and pending scrape
+futures are cancelled. Workers check `stop_event.is_set()` at the start and end of
+`_scrape_and_score()`.
 
-**What we fixed:**
+## Extraction safety (null beats hallucination)
 
-- After **3 pages** score ≥ 20 (product/version mention), set `stop_event` and cancel pending scrape futures.
-- After Gemini returns confidence **≥ 0.55**, set `stop_event` before returning (so any still-running workers exit at their next check).
+Scraped pages are untrusted input to Gemini. The extractor therefore:
 
-Workers call `stop_event.is_set()` at the start and end of `_scrape_and_score()`.
+- delimits page text in the prompt and tells the model never to follow instructions inside it;
+- requests JSON output (`response_mime_type=application/json`);
+- **drops any extracted date whose year does not appear on the page**, and lowers confidence
+  when the year appears but not the full date;
+- recomputes estimated end-of-support itself instead of trusting a model-computed estimate;
+- treats community/forum hosts (`community.*`, `forums.*`, `techcommunity.*`, ...) as off-domain
+  for confidence scoring, even when they sit under a trusted OEM domain.
 
 ## Crawl-first strategy (point 7 — robust end-to-end)
 
@@ -101,6 +111,17 @@ Expand coverage by adding rows to `SEED_HUBS` and `OEM_DOMAINS` in `seed_data.py
 
 - Keep real keys only in `.env` (gitignored). `.env.example` uses placeholders.
 - If a key was ever committed, rotate it in Google Cloud.
+- **SSRF:** `url_safety.is_safe_url()` resolves hostnames and rejects any non-public address
+  (loopback, RFC1918, link-local/metadata, CGNAT, numeric tricks such as `http://2130706433/`).
+  Direct HTTP fetches go through `safe_get()`, which re-validates every redirect hop and caps
+  response size (`SCRAPE_MAX_BYTES`, default 20 MB). DNS rebinding is narrowed, not eliminated:
+  don't run the crawler on a host with access to sensitive internal services.
+- **Spreadsheet output:** values starting with `= + - @` are written as text (formula / DDE
+  injection protection) — see `output_safety.py`.
+- **Source trust:** OEM auto-discovery only trusts domains named after the vendor (`acme.com`,
+  not `acme-eol.co.uk` or Wikipedia). Third-party search hits are never stored as crawl seeds.
+- **Third parties:** URLs are sent to Jina Reader (`r.jina.ai`); product/OEM names go to Exa,
+  DuckDuckGo and Gemini. Review this if your catalog is confidential.
 
 ## Project layout
 
@@ -110,10 +131,13 @@ engine.py        5-layer query orchestrator
 db.py            SQLite (products, discovered_urls, search_cache)
 crawler.py       BFS crawler
 scraper.py       Council of scrapers
-extractor.py     Gemini + confidence gate
+extractor.py     Gemini + confidence gate + date grounding
 search/          URL discovery orchestrator + providers
-searcher.py      Re-exports search_product_lifecycle
 seed_data.py     Hub URLs + OEM domains
 sources/         endoflife.date client
+url_safety.py    SSRF checks + safe_get (redirect re-validation, size cap)
+domain_utils.py  Shared hostname/domain trust helpers
+output_safety.py Spreadsheet formula-injection protection
 check_results.py Inspect products cache
+tests/           Offline unit tests
 ```

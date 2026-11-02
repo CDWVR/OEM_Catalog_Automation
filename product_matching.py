@@ -13,15 +13,16 @@ product names on the same page.
 import re
 from typing import Optional
 
+from version_utils import strip_trailing_version
+
 
 def normalize_product_name(name: str) -> str:
     return re.sub(r"\s+", " ", name.lower().strip())
 
 
 def edition_core(name: str) -> str:
-    """Product edition name without trailing version token (e.g. 'WAS 9.0' -> 'was')."""
-    n = normalize_product_name(name)
-    return re.sub(r"\s+v?\d+(?:\.\d+)*\s*$", "", n).strip()
+    """Product edition name without trailing version token (e.g. 'WAS 9.0' -> 'was', 'DB 19c' -> 'db')."""
+    return normalize_product_name(strip_trailing_version(name or ""))
 
 
 def _phrase_pattern(phrase: str) -> re.Pattern:
@@ -57,7 +58,7 @@ def count_boundary_phrase(text: str, phrase: str, skip_if_superset_prefix: bool 
 
 
 _STOP_SUFFIX_WORDS = frozenset({
-    "eos", "eol", "eol", "end", "of", "support", "life", "is", "are", "was", "were",
+    "eos", "eol", "end", "of", "support", "life", "is", "are", "was", "were",
     "the", "a", "an", "for", "from", "on", "at", "by", "with", "date", "dates",
 })
 
@@ -135,18 +136,26 @@ def score_product_mentions(
     }
 
 
-def products_match(requested: str, found: Optional[str]) -> bool:
-    """True if found product name is the same edition as requested (not a sibling superset)."""
+def products_match(requested: str, found: Optional[str], oem: str = "") -> bool:
+    """
+    True if found product name is the same edition as requested (not a sibling superset).
+
+    A leading vendor prefix is tolerated when it is part of the OEM name
+    ('Microsoft Windows Server 2019' == 'Windows Server 2019' for OEM 'Microsoft'),
+    but extra trailing words are not ('WAS Network Deployment' != 'WAS').
+    """
     if not found:
         return False
     req = edition_core(requested)
     fnd = edition_core(found)
     if req == fnd:
         return True
-    # Page names a longer edition (e.g. ND when user asked for base WAS)
-    if fnd.startswith(req + " "):
+    oem_tokens = set(re.findall(r"[a-z0-9]+", (oem or "").lower()))
+    if not oem_tokens:
         return False
-    # User asked for longer edition; page names shorter sibling only
-    if req.startswith(fnd + " "):
-        return False
+    for longer, shorter in ((fnd, req), (req, fnd)):
+        if shorter and longer.endswith(" " + shorter):
+            prefix = longer[: -len(shorter)].split()
+            if prefix and all(word in oem_tokens for word in prefix):
+                return True
     return False

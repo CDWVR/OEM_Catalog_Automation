@@ -23,7 +23,8 @@ DB_PATH = "lifecycle_v2.db"
 
 
 def _conn():
-    return sqlite3.connect(DB_PATH)
+    # timeout: Layer 3 scrape workers write snippets concurrently with the main thread
+    return sqlite3.connect(DB_PATH, timeout=30)
 
 
 # ─── Schema ─────────────────────────────────────────────────────────
@@ -99,6 +100,12 @@ def init_db():
 
     _migrate_products_schema(conn)
     _migrate_discovered_schema(conn)
+
+    # OEM lookups use COLLATE NOCASE — matching indexes avoid full scans as the crawl DB grows
+    c.execute("CREATE INDEX IF NOT EXISTS idx_discovered_oem ON discovered_urls(oem COLLATE NOCASE)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_hub_oem ON oem_hub_urls(oem COLLATE NOCASE)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_dyn_domains_oem ON oem_dynamic_domains(oem COLLATE NOCASE)")
+    c.execute("PRAGMA journal_mode=WAL")
     conn.commit()
     conn.close()
 
@@ -639,22 +646,24 @@ def delete_product_cache(product_name: str, oem: str) -> bool:
 
 
 def record_search_urls(oem: str, urls: list[str], source: str = "web_search"):
-    """Persist Layer 3 URLs for future crawl/search reuse."""
-    for url in urls:
-        if not url or not url.startswith("http"):
-            continue
-        if url_exists(url):
-            continue
-        save_discovered_url(
-            DiscoveredURL(
-                url=url,
-                oem=oem,
-                discovered_from=source,
-                depth=0,
-                url_type="unknown",
-                scrape_success=False,
-            )
+    """Persist Layer 3 URLs for future crawl/search reuse (new URLs only; one transaction)."""
+    rows = [
+        (url, oem, source, 0, "unknown", 0)
+        for url in urls
+        if url and url.startswith("http")
+    ]
+    if not rows:
+        return
+    conn = _conn()
+    try:
+        conn.executemany(
+            "INSERT OR IGNORE INTO discovered_urls "
+            "(url, oem, discovered_from, depth, url_type, scrape_success) VALUES (?, ?, ?, ?, ?, ?)",
+            rows,
         )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def save_product(product: ProductLifecycle):

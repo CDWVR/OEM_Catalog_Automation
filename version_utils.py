@@ -51,3 +51,30 @@ def mentions_version(product_name: str) -> bool:
 def normalize_version(version: str) -> str:
     """Comparable form: '2012 R2' -> '2012-r2', '15.0' -> '15.0'."""
     return re.sub(r"\s+", "-", version.strip().lower())
+
+
+def canonical_version(version: str) -> str:
+    """Loose comparable form: 'v8.0' -> '8', '19c' -> '19', '2012 R2' -> '2012-r2', '15.0.0' -> '15'."""
+    s = (version or "").strip().lower()
+    s = re.sub(r"^(?:version|release|v)\s*(?=\d)", "", s)
+    s = re.sub(r"[\s_]+", "-", s)
+    s = re.sub(r"^(\d{1,2})[cgi]$", r"\1", s)
+    while re.search(r"\d\.0$", s):
+        s = s[:-2]
+    return s
+
+
+def versions_match(a: Optional[str], b: Optional[str]) -> bool:
+    """True when two version labels denote the same release ('19' == '19c', '8' == '8.0',
+    '2012 R2' == '2012-R2', '2019' == 'Windows Server 2019')."""
+    if not a or not b:
+        return False
+
+    def forms(v: str) -> set[str]:
+        out = {canonical_version(v)}
+        embedded = extract_version(v)
+        if embedded:
+            out.add(canonical_version(embedded))
+        return {f for f in out if f}
+
+    return bool(forms(a) & forms(b))

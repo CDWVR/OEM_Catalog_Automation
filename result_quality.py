@@ -3,7 +3,6 @@ Lifecycle result quality — decide if extracted fields are useful enough to ret
 """
 
 import os
-from typing import Optional
 
 from models import ProductLifecycle
 

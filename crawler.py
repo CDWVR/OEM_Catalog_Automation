@@ -10,14 +10,13 @@ Flow:
 
 import re
 import time
-from typing import Optional
-from urllib.parse import urlparse
 from datetime import datetime
 from collections import deque
 
 import db
 from models import DiscoveredURL
-from scraper import scrape_url, REQUEST_DELAY, is_url_fresh
+from domain_utils import host_in_domains
+from scraper import fetch_links, scrape_url, REQUEST_DELAY, is_url_fresh
 from seed_data import get_oem_domains
 
 MAX_DEPTH = 3
@@ -80,15 +79,8 @@ SKIP_PATTERNS = [
 ]
 
 
-def _is_same_oem_domain(url: str, oem: str) -> bool:
-    domains = get_oem_domains(oem)
-    if not domains:
-        return False
-    hostname = urlparse(url).netloc.lower()
-    for domain in domains:
-        if hostname == domain or hostname.endswith("." + domain):
-            return True
-    return False
+def _is_same_oem_domain(url: str, domains: list[str]) -> bool:
+    return host_in_domains(url, domains)
 
 
 def _classify_url(url: str) -> str:
@@ -113,20 +105,8 @@ def _should_skip(url: str) -> bool:
     return any(re.search(p, url_lower) for p in SKIP_PATTERNS)
 
 
-def _is_worth_crawling(url: str) -> bool:
-    if _should_skip(url):
-        return False
-    url_lower = url.lower()
-    for pattern in LIFECYCLE_PATTERNS + LICENSING_PATTERNS:
-        if re.search(pattern, url_lower):
-            return True
-    if re.search(r'/products?/', url_lower) or re.search(r'/support', url_lower):
-        return True
-    return True
-
-
 def _should_follow_link(link: str, depth: int, max_depth: int) -> bool:
-    if depth >= 1 and not _is_worth_crawling(link):
+    if depth >= 1 and _should_skip(link):
         return False
     if depth >= 2 and _classify_url(link) == "unknown":
         return False
@@ -160,6 +140,7 @@ def crawl_oem(oem: str, max_depth: int = MAX_DEPTH, verbose: bool = True) -> int
         print(f"  Max depth: {max_depth}  |  Cap: {MAX_URLS_PER_OEM}")
         print(f"{'=' * 60}")
 
+    domains = get_oem_domains(oem)  # resolved once per crawl, not once per link
     queue = deque()
     visited: set[str] = set()
     scraped_count = 0
@@ -189,13 +170,15 @@ def crawl_oem(oem: str, max_depth: int = MAX_DEPTH, verbose: bool = True) -> int
         )
 
         if fresh:
+            # Content is fresh — only a cheap direct fetch for links (no headless browser).
             if verbose:
-                print(f"{indent}  [FRESH] Re-fetching for new links...")
-            result = scrape_url(url, need_links=True)
+                print(f"{indent}  [FRESH] Fetching links only...")
+            links = fetch_links(url) if depth < max_depth else []
             time.sleep(CRAWL_DELAY)
-            if result and result.get("links"):
+            if links:
                 _enqueue_children(
-                    result, url, depth, oem, max_depth, queue, visited, verbose, indent,
+                    {"links": links}, url, depth, oem, domains, max_depth,
+                    queue, visited, verbose, indent,
                 )
             continue
 
@@ -247,7 +230,7 @@ def crawl_oem(oem: str, max_depth: int = MAX_DEPTH, verbose: bool = True) -> int
                   f"type={url_type}, method={result.get('method', '?')}")
 
         _enqueue_children(
-            result, url, depth, oem, max_depth, queue, visited, verbose, indent,
+            result, url, depth, oem, domains, max_depth, queue, visited, verbose, indent,
         )
 
     if verbose:
@@ -266,6 +249,7 @@ def _enqueue_children(
     parent_url: str,
     depth: int,
     oem: str,
+    domains: list[str],
     max_depth: int,
     queue: deque,
     visited: set,
@@ -277,7 +261,7 @@ def _enqueue_children(
 
     queued = 0
     for link in result.get("links") or []:
-        if not _is_same_oem_domain(link, oem):
+        if not _is_same_oem_domain(link, domains):
             continue
         if link in visited:
             continue

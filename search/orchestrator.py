@@ -2,8 +2,8 @@
 Layer 3 URL discovery orchestrator.
 
 Order (SEARCH_PROVIDER=auto):
-  1. SQLite search_cache
-  2. discovered_urls (crawl DB — free)
+  1. discovered_urls (crawl DB — free, re-ranked every call, minus URLs Layer 2 already tried)
+  2. SQLite search_cache (web results only)
   3. Exa API (if EXA_API_KEY set) — primary web search
   4. DuckDuckGo / ddgs — fallback only
 
@@ -12,7 +12,7 @@ Docs: https://docs.exa.ai/reference/search-api-guide-for-coding-agents
 """
 
 import os
-from typing import List
+from typing import List, Optional
 from urllib.parse import urlparse
 
 import db
@@ -73,8 +73,8 @@ def _urls_from_provider_results(
             oem_urls.append(href)
         else:
             external.append(href)
-    oem_urls.sort(key=_score_url_lifecycle_relevance, reverse=True)
-    external.sort(key=_score_url_lifecycle_relevance, reverse=True)
+    oem_urls.sort(key=score_url_lifecycle_relevance, reverse=True)
+    external.sort(key=score_url_lifecycle_relevance, reverse=True)
     if oem_urls:
         return oem_urls[:max_results]
     return external[:max_results]
@@ -169,7 +169,7 @@ _PENALTY_PATH_KEYWORDS = (
 )
 
 
-def _score_url_lifecycle_relevance(url: str) -> int:
+def score_url_lifecycle_relevance(url: str) -> int:
     """Higher score = more likely a lifecycle/support documentation URL."""
     path = urlparse(url).path.lower()
     score = 0
@@ -184,90 +184,106 @@ def _score_url_lifecycle_relevance(url: str) -> int:
     return score
 
 
-def search_product_lifecycle(product_name: str, oem: str, max_results: int = 20) -> List[str]:
+def _merge(into: list[str], urls: list[str], exclude: set[str]) -> None:
+    for u in urls:
+        if u not in into and u not in exclude:
+            into.append(u)
+
+
+def _web_search(
+    product_name: str,
+    oem: str,
+    oem_domains: list[str],
+    provider_mode: str,
+    needed: int,
+    have: int,
+) -> list[str]:
+    """Paid/free web search (Exa -> DDGS fallback, or legacy explicit providers)."""
+    found: list[str] = []
+    exa = get_exa_provider() if provider_mode in ("auto", "exa") else None
+
+    # --- Exa (primary web search) ---
+    if exa:
+        _merge(found, _search_with_exa(exa, product_name, oem, oem_domains, needed), set())
+        for variant in get_search_name_variants(product_name, oem)[1:3]:
+            if len(found) >= needed:
+                break
+            _merge(
+                found,
+                _search_with_exa(exa, variant, oem, oem_domains, needed - len(found)),
+                set(),
+            )
+    elif provider_mode == "exa":
+        print("  [X] SEARCH_PROVIDER=exa but EXA_API_KEY is not set (or exa-py missing).")
+
+    # --- DDGS fallback ---
+    total = have + len(found)
+    if provider_mode in ("auto", "ddgs") and len(found) < needed:
+        if provider_mode == "auto" and (total >= max(5, needed // 2) or (exa and total >= 3)):
+            print(f"    -> [DDGS] Skipped — already have {total} URLs")
+        else:
+            _merge(found, _run_ddgs_queries(product_name, oem, oem_domains, needed - len(found)), set())
+
+    # --- Legacy providers (explicit opt-in only) ---
+    if provider_mode == "searxng":
+        searx = get_provider("searxng")
+        if searx:
+            raw = searx.search(f'{oem} "{product_name}" lifecycle end of support', max_results=10)
+            _merge(found, _urls_from_provider_results(raw, oem_domains, needed), set())
+    if provider_mode == "brave":
+        brave = get_provider("brave")
+        if brave:
+            raw = brave.search(f"{oem} {product_name} lifecycle", max_results=10)
+            _merge(found, _urls_from_provider_results(raw, oem_domains, needed), set())
+    return found
+
+
+def search_product_lifecycle(
+    product_name: str,
+    oem: str,
+    max_results: int = 20,
+    exclude_urls: Optional[set[str]] = None,
+) -> List[str]:
     """
     Find candidate lifecycle URLs for a product.
+
+    exclude_urls: URLs the caller already processed (e.g. Layer 2) — skipped so they are
+    not scraped and sent to Gemini a second time.
+    Only web-search results are cached (search_cache); crawl-DB URLs are re-ranked on every
+    call so newly crawled pages are picked up immediately.
     """
     provider_mode = os.getenv("SEARCH_PROVIDER", "auto").lower().strip()
     ttl = _cache_ttl_hours()
-
-    cached = db.get_search_cache(oem, product_name, "combined", ttl_hours=ttl)
-    if cached:
-        print(f"    -> [CACHE] {len(cached)} URLs (TTL {ttl}h)")
-        return cached[:max_results]
-
+    exclude = exclude_urls or set()
     oem_domains = get_oem_domains(oem)
     combined: list[str] = []
 
     # --- 1. Crawl database ---
     if provider_mode in ("auto", "discovered_only", "discovered_db"):
         db_urls = db.rank_discovered_urls_for_product(oem, product_name, limit=max_results)
-        if db_urls:
-            print(f"    -> [CRAWL-DB] {len(db_urls)} URLs from discovered_urls")
-            combined.extend(db_urls)
-            if len(combined) >= max_results and provider_mode == "discovered_only":
-                db.save_search_cache(oem, product_name, "combined", combined[:max_results])
-                return combined[:max_results]
+        before = len(combined)
+        _merge(combined, db_urls, exclude)
+        if len(combined) > before:
+            print(f"    -> [CRAWL-DB] {len(combined) - before} URLs from discovered_urls")
+    if provider_mode in ("discovered_only", "discovered_db") or len(combined) >= max_results:
+        return combined[:max_results]
 
-    # --- 2. Exa (primary web search) ---
-    use_exa = provider_mode in ("auto", "exa")
-    if use_exa and len(combined) < max_results:
-        exa = get_exa_provider()
-        if exa:
-            needed = max_results - len(combined)
-            found = _search_with_exa(exa, product_name, oem, oem_domains, needed)
-            for u in found:
-                if u not in combined:
-                    combined.append(u)
-            for variant in get_search_name_variants(product_name, oem)[1:3]:
-                if len(combined) >= max_results:
-                    break
-                extra = _search_with_exa(
-                    exa, variant, oem, oem_domains, max_results - len(combined),
-                )
-                for u in extra:
-                    if u not in combined:
-                        combined.append(u)
-        elif provider_mode == "exa":
-            print("  [X] SEARCH_PROVIDER=exa but EXA_API_KEY is not set (or exa-py missing).")
-
-    # --- 3. DDGS fallback ---
-    skip_ddgs = provider_mode == "auto" and len(combined) >= max(5, max_results // 2)
-    if provider_mode in ("auto", "ddgs") and len(combined) < max_results and not skip_ddgs:
-        if provider_mode == "auto" and get_exa_provider() and len(combined) >= 3:
-            print(f"    -> [DDGS] Skipped — Exa/crawl already has {len(combined)} URLs")
-        else:
-            needed = max_results - len(combined)
-            found = _run_ddgs_queries(product_name, oem, oem_domains, needed)
-            for u in found:
-                if u not in combined:
-                    combined.append(u)
-    elif skip_ddgs:
-        print(f"    -> [DDGS] Skipped — crawl DB has {len(combined)} URLs")
-
-    # --- Legacy providers (explicit only) ---
-    if provider_mode == "searxng" and len(combined) < max_results:
-        searx = get_provider("searxng")
-        if searx:
-            raw = searx.search(
-                f'{oem} "{product_name}" lifecycle end of support', max_results=10,
-            )
-            for u in _urls_from_provider_results(raw, oem_domains, max_results):
-                if u not in combined:
-                    combined.append(u)
-
-    if provider_mode == "brave" and len(combined) < max_results:
-        brave = get_provider("brave")
-        if brave:
-            raw = brave.search(f'{oem} {product_name} lifecycle', max_results=10)
-            for u in _urls_from_provider_results(raw, oem_domains, max_results):
-                if u not in combined:
-                    combined.append(u)
+    # --- 2. Web search (cached) ---
+    cached = db.get_search_cache(oem, product_name, "web", ttl_hours=ttl)
+    if cached is not None:
+        print(f"    -> [CACHE] {len(cached)} web URLs (TTL {ttl}h)")
+        web_urls = cached
+    else:
+        web_urls = _web_search(
+            product_name, oem, oem_domains, provider_mode,
+            needed=max_results, have=len(combined),
+        )
+        if web_urls:
+            db.save_search_cache(oem, product_name, "web", web_urls)
+    _merge(combined, web_urls, exclude)
 
     if not combined:
         print(f"    -> No URLs found for '{product_name}' / '{oem}'.")
         print("       Tip: set EXA_API_KEY, run crawl --all, or check OEM in seed_data.")
         return []
-
-    db.save_search_cache(oem, product_name, "combined", combined)
     return combined[:max_results]
