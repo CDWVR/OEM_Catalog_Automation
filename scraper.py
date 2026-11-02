@@ -2,7 +2,7 @@
 Scraper — Council of Scrapers (fallback chain per URL).
 
 Order in scrape_url() (except PDFs):
-  1. PDF URLs     -> PyPDF2 download + text extract
+  1. PDF URLs     -> pypdf download + text extract
   2. Crawl4AI     -> headless browser (optional; pip install crawl4ai)
   3. Jina Reader  -> https://r.jina.ai/{url} (free, no API key)
   4. Direct HTTP  -> requests + BeautifulSoup text extraction
@@ -16,12 +16,13 @@ Freshness (crawler only):
 
 import requests
 import hashlib
-import time
 import asyncio
 from bs4 import BeautifulSoup
 from typing import Optional
 from urllib.parse import urljoin, urlparse, urldefrag
 from datetime import datetime, timedelta
+
+from url_safety import ResponseTooLarge, UnsafeURLError, is_safe_url, safe_get
 
 # --- Freshness Configuration ---
 FRESHNESS_DAYS = 15  # URLs scraped within this window are considered fresh
@@ -42,7 +43,7 @@ def is_url_fresh(last_scraped: Optional[str], freshness_days: int = FRESHNESS_DA
         return False
 
 
-# --- Method 1: Direct Requests (fast, free) ---
+# --- Direct HTTP (last-resort method; also used for link extraction) ---
 
 HEADERS = {
     "User-Agent": (
@@ -52,7 +53,8 @@ HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    # No "br": requests cannot decode brotli unless the optional brotli package is installed.
+    "Accept-Encoding": "gzip, deflate",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
     "Sec-Fetch-Dest": "document",
@@ -79,37 +81,35 @@ def _get_session() -> requests.Session:
 
 
 def _fetch_direct(url: str, timeout: int = 20) -> Optional[str]:
-    """Method 1: Direct HTTP request with browser-like headers."""
-    session = _get_session()
+    """Direct HTTP request with browser-like headers (redirects re-validated, size capped)."""
     try:
-        r = session.get(url, timeout=timeout, allow_redirects=True)
+        r = safe_get(_get_session(), url, timeout=timeout)
         r.raise_for_status()
         return r.text
     except requests.exceptions.HTTPError as e:
         print(f"    [Scraper:Direct] HTTP {e.response.status_code} for {url}")
+        return None
+    except (UnsafeURLError, ResponseTooLarge) as e:
+        print(f"    [Scraper:Direct] Blocked: {type(e).__name__}: {str(e)[:80]}")
         return None
     except requests.exceptions.RequestException as e:
         print(f"    [Scraper:Direct] Failed: {type(e).__name__}")
         return None
 
 
-# --- Method 2: Jina AI Reader (free, handles JS + anti-bot) ---
+# --- Jina AI Reader (free, handles JS + anti-bot) ---
 
 JINA_READER_PREFIX = "https://r.jina.ai/"
 
 def _fetch_jina(url: str, timeout: int = 30, max_chars: int = 12000) -> Optional[dict]:
     """
-    Method 2: Jina AI Reader.
+    Jina AI Reader.
     Free API that renders JS, bypasses anti-bot, returns clean markdown.
     No API key required.
     """
     jina_url = f"{JINA_READER_PREFIX}{url}"
     try:
-        r = requests.get(
-            jina_url,
-            headers={"Accept": "text/plain"},
-            timeout=timeout,
-        )
+        r = safe_get(requests, jina_url, headers={"Accept": "text/plain"}, timeout=timeout)
         if r.status_code != 200:
             print(f"    [Scraper:Jina] HTTP {r.status_code} for {url}")
             return None
@@ -125,16 +125,16 @@ def _fetch_jina(url: str, timeout: int = 30, max_chars: int = 12000) -> Optional
             "hash": hashlib.md5(text[:max_chars].encode("utf-8")).hexdigest(),
             "method": "jina",
         }
-    except requests.exceptions.RequestException as e:
+    except (requests.exceptions.RequestException, UnsafeURLError, ResponseTooLarge) as e:
         print(f"    [Scraper:Jina] Failed: {type(e).__name__}")
         return None
 
 
-# --- Method 3: Crawl4AI (headless browser, optional) ---
+# --- Crawl4AI (headless browser, optional) ---
 
 def _fetch_crawl4ai(url: str, max_chars: int = 12000) -> Optional[dict]:
     """
-    Method 3: Crawl4AI -- headless browser scraping.
+    Crawl4AI -- headless browser scraping.
     Handles JavaScript-rendered pages and advanced anti-bot.
     Only used if crawl4ai is installed (pip install crawl4ai).
     """
@@ -151,6 +151,10 @@ def _fetch_crawl4ai(url: str, max_chars: int = 12000) -> Optional[dict]:
         try:
             async with AsyncWebCrawler(verbose=False) as crawler:
                 result = await crawler.arun(url=url)
+                final_url = getattr(result, "redirected_url", None) or getattr(result, "url", None)
+                if result and final_url and final_url != url and not is_safe_url(final_url):
+                    print(f"    [Scraper:Crawl4AI] Redirected to unsafe URL — discarded")
+                    return None
                 if result and result.markdown:
                     text = result.markdown.strip()[:max_chars]
                     return {
@@ -174,7 +178,7 @@ def _fetch_crawl4ai(url: str, max_chars: int = 12000) -> Optional[dict]:
             loop.close()
 
 
-# --- HTML Processing (for Method 1) ---
+# --- HTML Processing (direct HTTP) ---
 
 def extract_text(html: str, max_chars: int = 12000) -> str:
     """
@@ -236,7 +240,7 @@ def content_hash(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
-# --- Method 4: PDF Text Extraction ---
+# --- PDF / CSV downloads ---
 
 def _path_extension(url: str) -> str:
     return urlparse(url).path.lower().rsplit(".", 1)[-1] if "." in urlparse(url).path else ""
@@ -264,20 +268,22 @@ def _is_browser_skip_url(url: str) -> bool:
     return _path_extension(url) in _BROWSER_SKIP_EXTENSIONS
 
 
+_PDF_MAX_PAGES = 200
+
+
 def _fetch_pdf(url: str, max_chars: int = 12000) -> Optional[dict]:
     """
-    Download and extract text from a PDF file.
-    Uses PyPDF2 for lightweight, pure-Python PDF parsing.
+    Download and extract text from a PDF file (pypdf; size- and page-capped).
     """
     try:
-        from PyPDF2 import PdfReader
+        from pypdf import PdfReader
         import io
     except ImportError:
-        print(f"    [Scraper:PDF] PyPDF2 not installed. Run: pip install PyPDF2")
+        print(f"    [Scraper:PDF] pypdf not installed. Run: pip install pypdf")
         return None
 
     try:
-        r = _get_session().get(url, timeout=30, allow_redirects=True)
+        r = safe_get(_get_session(), url, timeout=30)
         if r.status_code != 200:
             print(f"    [Scraper:PDF] HTTP {r.status_code} for {url}")
             return None
@@ -289,10 +295,14 @@ def _fetch_pdf(url: str, max_chars: int = 12000) -> Optional[dict]:
 
         reader = PdfReader(io.BytesIO(r.content))
         text_parts = []
-        for page in reader.pages:
+        chars = 0
+        for page in reader.pages[:_PDF_MAX_PAGES]:
             page_text = page.extract_text()
             if page_text:
                 text_parts.append(page_text)
+                chars += len(page_text)
+                if chars >= max_chars:
+                    break
 
         text = "\n".join(text_parts).strip()
         if not text or len(text) < 50:
@@ -318,7 +328,7 @@ def _fetch_csv(url: str, max_chars: int = 12000) -> Optional[dict]:
     Avoids Crawl4AI/Playwright 'Download is starting' errors.
     """
     try:
-        r = _get_session().get(url, timeout=45, allow_redirects=True)
+        r = safe_get(_get_session(), url, timeout=45)
         if r.status_code != 200:
             print(f"    [Scraper:CSV] HTTP {r.status_code} for {url[:80]}")
             return None
@@ -351,7 +361,7 @@ def _fetch_csv(url: str, max_chars: int = 12000) -> Optional[dict]:
             "hash": content_hash(text),
             "method": "csv",
         }
-    except requests.exceptions.RequestException as e:
+    except (requests.exceptions.RequestException, UnsafeURLError, ResponseTooLarge) as e:
         print(f"    [Scraper:CSV] Failed: {type(e).__name__}")
         return None
 
@@ -373,14 +383,20 @@ def _supplement_links(url: str, result: dict) -> dict:
     return result
 
 
+def fetch_links(url: str) -> list[str]:
+    """Cheap link discovery (single direct HTTP fetch) — used for fresh pages during crawl."""
+    if not is_safe_url(url) or _is_pdf_url(url) or _is_csv_url(url) or _is_browser_skip_url(url):
+        return []
+    html = _fetch_direct(url)
+    return extract_links(html, url) if html else []
+
+
 def scrape_url(url: str, max_chars: int = 12000, need_links: bool = False) -> Optional[dict]:
     """
     Council of Scrapers: PDF -> CSV -> Crawl4AI -> Jina -> direct HTTP.
 
     need_links=True (crawler): always attach <a href> list for recursive BFS.
     """
-    from url_safety import is_safe_url
-
     if not is_safe_url(url):
         print(f"    [Scraper] Blocked unsafe URL: {url[:80]}")
         return None

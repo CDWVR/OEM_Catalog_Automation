@@ -9,10 +9,12 @@ Layer 1 — endoflife.date REST API (https://endoflife.date/docs/api).
 
 import re
 import requests
+from functools import lru_cache
 from typing import Optional
 from datetime import datetime
+from urllib.parse import quote
 from models import ProductLifecycle
-from fuzzy_match import match_registry_value, normalize_key, phrase_matches
+from fuzzy_match import match_registry_value, normalize_key
 from version_utils import extract_version, mentions_version, normalize_version, strip_trailing_version
 
 BASE_URL = "https://endoflife.date/api"
@@ -114,9 +116,9 @@ SLUG_MAP = {
     "sharepoint server": "sharepoint",
     "visual studio": "visual-studio",
     "powershell": "powershell",
-    # Networking
+    # Apple (guarded by _SLUG_OEM_GUARD — "IOS" from Cisco is a different product)
     "ios": "ios",
-    "cisco ios": "ios",
+    "ipados": "ipados",
     # Others
     "wordpress": "wordpress",
     "drupal": "drupal",
@@ -131,15 +133,43 @@ SLUG_MAP = {
 }
 
 
-def _get_all_slugs() -> list[str]:
-    """Fetch full product list from endoflife.date."""
+# Slugs whose names collide with other vendors' products: only used when the OEM matches.
+_SLUG_OEM_GUARD = {
+    "ios": ("apple",),
+    "ipados": ("apple",),
+    "macos": ("apple",),
+    "office": ("microsoft",),
+}
+
+
+def _slug_allowed_for_oem(slug: Optional[str], oem: Optional[str]) -> bool:
+    required = _SLUG_OEM_GUARD.get(slug or "")
+    if not required or oem is None:
+        return True
+    oem_lower = oem.lower()
+    return any(token in oem_lower for token in required)
+
+
+@lru_cache(maxsize=512)
+def _get_json(url: str):
+    """Cached GET (one query calls this from version resolution AND Layer 1)."""
     try:
-        r = requests.get(f"{BASE_URL}/all.json", timeout=10)
+        r = requests.get(url, timeout=10)
         if r.status_code == 200:
             return r.json()
-    except Exception:
+    except (requests.RequestException, ValueError):
         pass
-    return []
+    return None
+
+
+def _get_all_slugs() -> list[str]:
+    """Fetch full product list from endoflife.date."""
+    data = _get_json(f"{BASE_URL}/all.json")
+    return data if isinstance(data, list) else []
+
+
+def _alnum(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
 
 
 def _name_without_version(product_name: str) -> str:
@@ -187,44 +217,31 @@ def _find_cycle_for_version(cycles: list, version: str, slug: Optional[str] = No
     return None
 
 
-def _fetch_cycles(product_name: str) -> tuple[Optional[str], list]:
+def _fetch_cycles(product_name: str, oem: Optional[str] = None) -> tuple[Optional[str], list]:
     """Return (slug, cycles list) or (None, [])."""
     slug = _find_slug(product_name)
     if not slug:
         return None, []
-    try:
-        r = requests.get(f"{BASE_URL}/{slug}.json", timeout=10)
-        if r.status_code != 200:
-            all_slugs = _get_all_slugs()
-            base = _name_without_version(product_name).lower()
-            tokens = re.sub(r"[^a-z0-9]+", "", base)
-            matched = next(
-                (
-                    s for s in all_slugs
-                    if s in base.replace(" ", "-")
-                    or s in base.replace(" ", "")
-                    or (tokens and tokens in re.sub(r"[^a-z0-9]+", "", s))
-                    or re.sub(r"[^a-z0-9]+", "", s) in tokens
-                ),
-                None,
-            )
-            if not matched:
-                return slug, []
-            slug = matched
-            r = requests.get(f"{BASE_URL}/{slug}.json", timeout=10)
-            if r.status_code != 200:
-                return slug, []
-        cycles = r.json()
-        if cycles and isinstance(cycles, list):
-            return slug, cycles
-    except Exception:
-        pass
+    cycles = _get_json(f"{BASE_URL}/{quote(slug, safe='')}.json")
+    if not isinstance(cycles, list):
+        # Fallback: exact name match against the catalog only. Substring matching here used to
+        # map e.g. "Gong Analytics" -> "go" and return another product's dates at 90%.
+        wanted = _alnum(_name_without_version(product_name))
+        matched = next((s for s in _get_all_slugs() if wanted and _alnum(s) == wanted), None)
+        if not matched:
+            return slug, []
+        slug = matched
+        cycles = _get_json(f"{BASE_URL}/{quote(slug, safe='')}.json")
+    if not _slug_allowed_for_oem(slug, oem):
+        return None, []
+    if cycles and isinstance(cycles, list):
+        return slug, cycles
     return slug, []
 
 
-def get_latest_cycle_version(product_name: str) -> Optional[str]:
+def get_latest_cycle_version(product_name: str, oem: Optional[str] = None) -> Optional[str]:
     """Return the latest cycle version string from endoflife.date, or None."""
-    _, cycles = _fetch_cycles(product_name)
+    _, cycles = _fetch_cycles(product_name, oem)
     if not cycles:
         return None
     return str(cycles[0].get("cycle", "")) or None
@@ -240,7 +257,7 @@ def search_endoflife(
     Query endoflife.date for a product.
     Returns ProductLifecycle if found, None if not.
     """
-    slug, cycles = _fetch_cycles(product_name)
+    slug, cycles = _fetch_cycles(product_name, oem)
     if not slug or not cycles:
         return None
 

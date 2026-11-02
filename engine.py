@@ -5,7 +5,7 @@ Layer 0 : SQLite products cache     (instant replay of verified extractions)
 Layer 1 : endoflife.date API        (structured EoL/EoS; no licensing fields)
 Layer 2 : discovered_urls + scrape  (re-scrape crawled pages, rank by mentions)
 Layer 3 : URL discovery + pipeline
-          - search/orchestrator: cache -> crawl DB -> Exa -> DDGS fallback (cached)
+          - search/orchestrator: crawl DB (minus Layer 2 URLs) -> cache -> Exa -> DDGS
           - Scrape up to 20 URLs, 3 concurrent workers (ThreadPoolExecutor)
           - stop_event cancels in-flight scrapes once enough relevant pages exist
           - Score pages; send top 5 relevant pages to Gemini (max 5)
@@ -24,12 +24,14 @@ from models import ProductLifecycle, QueryResult
 from sources.endoflife_api import search_endoflife
 from scraper import scrape_url
 from extractor import extract_from_content, CONFIDENCE_THRESHOLD
-from searcher import search_product_lifecycle
-from search.orchestrator import _score_url_lifecycle_relevance
+from search.orchestrator import search_product_lifecycle
+from search.orchestrator import score_url_lifecycle_relevance
 from version_resolver import prepare_query
 from product_matching import score_product_mentions
 from product_aliases import get_aliases, get_search_name_variants
 from result_quality import accept_as_found, annotate_partial
+from domain_utils import host_in_domains, is_official_oem_url
+from seed_data import get_oem_domains
 
 
 def _layer2_prescreen_limit() -> int:
@@ -134,11 +136,11 @@ def _log_query_failure(product_name: str, oem: str, stats: dict) -> None:
 
 
 def _promote_verified_source(oem: str, source_url: str, confidence: float):
-    """Promote OEM crawl seeds only for confident OEM-page extractions."""
+    """Promote OEM crawl seeds only for confident extractions from official OEM pages."""
     if confidence < CONFIDENCE_THRESHOLD:
         return
-    if "endoflife.date" in source_url:
-        return
+    if not is_official_oem_url(source_url, get_oem_domains(oem)):
+        return  # never seed the crawler from third-party or community pages
     from crawler import _classify_url
     db.promote_to_hub(oem, source_url, _classify_url(source_url), verified=True)
 
@@ -178,7 +180,7 @@ def _score_page(text: str, url: str, product_name: str, base_name: str, version:
     Lifecycle catalog URLs (eol-matrix, etc.) score on URL path even when the
   product row is absent from a truncated scrape.
     """
-    url_bonus = _score_url_lifecycle_relevance(url)
+    url_bonus = score_url_lifecycle_relevance(url)
     catalog = _is_lifecycle_catalog_url(url)
 
     match = score_product_mentions(text, product_name, base_name)
@@ -293,7 +295,6 @@ def query(
     )
     if eol:
         eol.product_name = product_name
-    if eol:
         if verbose:
             print(f"  [OK] Found via endoflife.date  (confidence: {eol.confidence:.0%})")
         db.save_product(eol)
@@ -307,6 +308,10 @@ def query(
     discovered_urls = db.get_discovered_urls(oem)
 
     candidate_urls = []
+    ranked_candidates: list = []
+    # URLs Layer 2 rejected or already sent to Gemini — Layer 3 skips them (no double work).
+    # Eligible pages that Layer 2 did not get to extract stay available to Layer 3.
+    layer2_checked: set[str] = set()
     if not discovered_urls:
         if verbose:
             print(f"  [X] No discovered URLs for '{oem}'. Proceeding to web search.")
@@ -337,15 +342,16 @@ def query(
             if u.url not in seen_order:
                 ordered.append(u)
 
-        ranked_candidates = []
         for url_obj in ordered[: _layer2_prescreen_limit()]:
             result = _layer2_get_page_text(url_obj.url)
             if not result or not result["text"]:
+                layer2_checked.add(url_obj.url)
                 continue
             if not _layer2_page_eligible(
                 result["text"], url_obj.url, url_obj.url_type,
                 search_name, oem, base_name,
             ):
+                layer2_checked.add(url_obj.url)
                 continue
             match = score_product_mentions(result["text"], search_name, base_name)
             relevance_score = match["relevance_score"]
@@ -369,12 +375,12 @@ def query(
                 if verbose:
                     print(f"    -> [{relevance_score} hits] {url_obj.url[:70]}...")
 
+                layer2_checked.add(url_obj.url)
                 extraction = extract_from_content(
                     content=result["text"],
                     product_name=product_name,
                     oem=oem,
                     source_url=url_obj.url,
-                    depth=url_obj.depth,
                     target_version=version,
                     version_auto_resolved=prep.version_auto_resolved,
                     resolved_version=version,
@@ -401,10 +407,18 @@ def query(
     if verbose:
         print("  -> Layer 3: Autonomous Web Search (concurrent)...")
 
-    web_urls = search_product_lifecycle(search_name, oem, max_results=20)
-    web_count = len(web_urls) if web_urls else 0
+    web_urls = search_product_lifecycle(
+        search_name, oem, max_results=20, exclude_urls=layer2_checked,
+    )
+    web_count = len(web_urls)
+    scraped_pages: list = []
+    relevant: list = []
+    pipeline: list = []
+    best_web_confidence: Optional[float] = None
     if web_urls:
-        db.record_search_urls(oem, web_urls)
+        # Only official OEM-domain URLs are persisted for future crawl/Layer 2 reuse.
+        oem_domains = get_oem_domains(oem)
+        db.record_search_urls(oem, [u for u in web_urls if host_in_domains(u, oem_domains)])
 
     if web_urls:
         product_version = version or ""
@@ -412,7 +426,6 @@ def query(
         # stop_event: workers check before/after scrape; set when we have
         # enough high-relevance pages so pending tasks exit early.
         stop_event = threading.Event()
-        scraped_pages = []
         MIN_RELEVANCE_SCORE = 20
         ENOUGH_RELEVANT_PAGES = 3
 
@@ -451,8 +464,10 @@ def query(
                                 for pending in future_to_url:
                                     pending.cancel()
                                 break
-                except Exception:
-                    pass
+                except Exception as e:
+                    if verbose:
+                        print(f"    [!] Scrape worker failed for {future_to_url[future][:60]}: "
+                              f"{type(e).__name__}")
 
         # ── RANK BY SCORE (most promising first) ──
         scraped_pages.sort(key=lambda x: x[0], reverse=True)
@@ -481,7 +496,6 @@ def query(
                 product_name=product_name,
                 oem=oem,
                 source_url=url,
-                depth=0,
                 target_version=version,
                 version_auto_resolved=prep.version_auto_resolved,
                 resolved_version=version,
@@ -495,7 +509,6 @@ def query(
                     print(f"      [OK] confidence={extraction.confidence:.0%}")
 
                 if accept_as_found(extraction, CONFIDENCE_THRESHOLD):
-                    stop_event.set()
                     accepted = _return_if_acceptable(
                         best_web_result, oem, verbose,
                         f"Found after {extracted_count} extractions",
@@ -523,11 +536,11 @@ def query(
         oem,
         {
             "layer2_candidates": len(candidate_urls),
-            "layer2_eligible": len(ranked_candidates) if "ranked_candidates" in locals() else 0,
-            "layer3_scraped": len(scraped_pages) if "scraped_pages" in locals() else 0,
-            "layer3_relevant": len(relevant) if "relevant" in locals() else 0,
-            "layer3_pipeline": len(pipeline) if "pipeline" in locals() else 0,
-            "best_confidence": locals().get("best_web_confidence"),
+            "layer2_eligible": len(ranked_candidates),
+            "layer3_scraped": len(scraped_pages),
+            "layer3_relevant": len(relevant),
+            "layer3_pipeline": len(pipeline),
+            "best_confidence": best_web_confidence,
         },
     )
     return QueryResult(
@@ -538,21 +551,3 @@ def query(
             f"'{product_name}' by '{oem}'."
         ),
     )
-
-
-def batch_query(products: list[dict], verbose: bool = True) -> list[QueryResult]:
-    """
-    Query multiple products. Each dict should have 'product_name' and 'oem' keys.
-    Returns list of QueryResults in the same order.
-    """
-    results = []
-    for i, product in enumerate(products):
-        if verbose:
-            print(f"\n[{i + 1}/{len(products)}]", end="")
-        result = query(
-            product["product_name"],
-            product["oem"],
-            verbose=verbose,
-        )
-        results.append(result)
-    return results

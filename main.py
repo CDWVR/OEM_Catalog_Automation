@@ -154,10 +154,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import db
-from engine import query, batch_query
+from engine import query
 from crawler import crawl_oem, crawl_all_oems
 from seed_data import seed_database
 from models import QueryResult
+from output_safety import excel_safe
+
+BATCH_SAVE_EVERY = 10  # rows between incremental saves (rewriting the workbook is O(rows))
 
 
 def _default_crawl_depth() -> int:
@@ -361,7 +364,11 @@ def batch_mode(input_file: str, output_file: str):
     for col in out_cols:
         if col not in df.columns:
             df[col] = ""
+        else:
+            # pre-existing (e.g. all-NaN float) columns must accept text on re-runs
+            df[col] = df[col].astype(object)
 
+    processed = 0
     for index, row in df.iterrows():
         oem = str(row[pub_col]).strip()
         product = str(row[prod_col]).strip()
@@ -384,31 +391,41 @@ def batch_mode(input_file: str, output_file: str):
                 eos = f"~{d.estimated_end_of_support} (est.)"
             elif not eos and d.support_policy_relative:
                 eos = f"[policy] {d.support_policy_relative}"
-            df.at[index, "End of Support"] = eos
-            df.at[index, "End of Extended Support"] = d.end_of_extended_support or ""
-            df.at[index, "End of Life"] = d.end_of_life or ""
-            df.at[index, "Estimated EoS"] = d.estimated_end_of_support or ""
-            df.at[index, "Support Policy"] = d.support_policy_relative or ""
-            df.at[index, "Release Date"] = d.release_date or ""
-            df.at[index, "Date Precision"] = d.date_precision or ""
-            df.at[index, "Resolved Version"] = (
-                (d.resolved_version or "") + (" (auto)" if d.version_auto_resolved else "")
-            )
-            df.at[index, "Licensing Model"] = d.licensing_model or ""
-            df.at[index, "Chargeability"] = d.chargeability_type or ""
-            df.at[index, "Source URL"] = d.source_url
-            df.at[index, "Confidence"] = f"{d.confidence:.0%}"
-            df.at[index, "Data Source"] = d.data_source
-            df.at[index, "Status"] = "Found"
+            values = {
+                "End of Support": eos,
+                "End of Extended Support": d.end_of_extended_support or "",
+                "End of Life": d.end_of_life or "",
+                "Estimated EoS": d.estimated_end_of_support or "",
+                "Support Policy": d.support_policy_relative or "",
+                "Release Date": d.release_date or "",
+                "Date Precision": d.date_precision or "",
+                "Resolved Version": (
+                    (d.resolved_version or "") + (" (auto)" if d.version_auto_resolved else "")
+                ),
+                "Licensing Model": d.licensing_model or "",
+                "Chargeability": d.chargeability_type or "",
+                "Source URL": d.source_url,
+                "Confidence": f"{d.confidence:.0%}",
+                "Data Source": d.data_source,
+                "Status": "Found",
+            }
         else:
-            df.at[index, "Status"] = f"Not Found: {result.reason[:100]}" if result.reason else "Not Found"
+            values = {
+                "Status": f"Not Found: {result.reason[:100]}" if result.reason else "Not Found",
+            }
+        # Scraped/LLM text must never be written as a live spreadsheet formula
+        for col, value in values.items():
+            df.at[index, col] = excel_safe(value)
 
-        # Save incrementally
-        df.to_excel(output_file, index=False)
+        processed += 1
+        if processed % BATCH_SAVE_EVERY == 0:
+            df.to_excel(output_file, index=False)
 
+    df.to_excel(output_file, index=False)
     print(f"\n\n  [OK] Results saved to {output_file}")
     found = len(df[df["Status"] == "Found"])
-    print(f"    Found: {found}/{len(df)} ({found/len(df)*100:.0f}%)")
+    pct = f" ({found / len(df) * 100:.0f}%)" if len(df) else ""
+    print(f"    Found: {found}/{len(df)}{pct}")
 
 
 # --- Main ---

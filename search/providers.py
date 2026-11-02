@@ -11,9 +11,10 @@ Canonical Exa docs: https://docs.exa.ai/reference/search-api-guide-for-coding-ag
 import os
 import time
 from typing import List, Dict, Optional, Protocol
-from urllib.parse import urlparse
 
 import requests
+
+from domain_utils import host_in_domains
 
 try:
     from ddgs import DDGS
@@ -252,10 +253,4 @@ def get_provider(name: str) -> SearchProvider | None:
 
 
 def is_oem_url(url: str, oem_domains: list[str]) -> bool:
-    if not oem_domains:
-        return False
-    hostname = urlparse(url).netloc.lower()
-    for domain in oem_domains:
-        if hostname == domain or hostname.endswith("." + domain):
-            return True
-    return False
+    return host_in_domains(url, oem_domains)

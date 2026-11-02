@@ -1,0 +1,23 @@
+# CodeRabbit configuration — https://docs.coderabbit.ai/getting-started/configure-coderabbit
+# Requires the CodeRabbit GitHub App to be installed on this repository (free tier).
+language: "en-US"
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+    - "!docs/workflow/*.png"
+    - "!WORKFLOW.png"
+    - "!*.xlsx"
+  path_instructions:
+    - path: "**/*.py"
+      instructions: >-
+        This pipeline must prefer null over a wrong answer. Flag anything that could let
+        scraped/untrusted web content raise confidence, bypass url_safety, or reach the
+        Excel output unsanitised.
+chat:
+  auto_reply: true

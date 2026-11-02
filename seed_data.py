@@ -52,8 +52,10 @@ SEED_HUBS = [
 
 
 # ─── OEM Domain Registry ───────────────────────────────────────────
-# Used by the crawler to enforce domain-lock.
-# key: normalized OEM name → list of trusted domains
+# Used by the crawler to enforce domain-lock and by extraction confidence scoring.
+# key: normalized OEM name → list of trusted domains. Keep these narrow: every subdomain of an
+# entry is trusted. Community/forum hosts may be crawled, but domain_utils.is_user_generated_host()
+# excludes them from "official source" confidence.
 
 OEM_DOMAINS = {
     "bmc software":  ["bmc.com", "docs.bmc.com", "webapps.bmc.com", "community.bmc.com"],
@@ -64,11 +66,11 @@ OEM_DOMAINS = {
     "cisco":         ["cisco.com", "community.cisco.com"],
     "vmware":        ["vmware.com", "broadcom.com", "docs.vmware.com", "knowledge.broadcom.com"],
     "broadcom":      ["broadcom.com", "vmware.com", "support.broadcom.com", "knowledge.broadcom.com"],
-    "ibm":           ["ibm.com", "community.ibm.com", "developer.ibm.com", "docs.kyndryl.com"],
+    "ibm":           ["ibm.com", "community.ibm.com", "developer.ibm.com"],
     "sap":           ["sap.com", "community.sap.com", "help.sap.com"],
     "canonical":     ["ubuntu.com", "canonical.com", "discourse.ubuntu.com"],
-    "aws":           ["aws.amazon.com", "amazon.com", "docs.aws.amazon.com"],
-    "google":        ["cloud.google.com", "google.com", "support.google.com"],
+    "aws":           ["aws.amazon.com", "docs.aws.amazon.com"],
+    "google":        ["cloud.google.com", "support.google.com"],
     "hpe":           ["hpe.com", "support.hpe.com", "community.hpe.com"],
     "dell":          ["dell.com", "support.dell.com"],
     "juniper":       ["juniper.net", "community.juniper.net", "supportportal.juniper.net"],

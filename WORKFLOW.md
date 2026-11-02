@@ -99,7 +99,7 @@ flowchart TD
     L2B -->|yes| END_OK
     L2B -->|no| L3[Layer 3]
 
-    L3 --> L3A[search_cache → crawl DB → Exa → DDGS<br/>up to 20 URLs]
+    L3 --> L3A[crawl DB minus Layer 2 URLs → search_cache → Exa → DDGS<br/>up to 20 URLs]
     L3A --> L3B[Scrape 3 workers<br/>score pages, top 5 → Gemini]
     L3B --> L3C{accept_as_found?}
     L3C -->|yes, early or after pipeline| END_OK
@@ -124,18 +124,19 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A[search_product_lifecycle] --> B{search_cache fresh?}
-    B -->|yes| Z[Return cached URLs]
-    B -->|no| C[rank_discovered_urls_for_product]
-    C --> D[Exa lifecycle search<br/>+ alias variants]
+    A[search_product_lifecycle] --> C[rank_discovered_urls_for_product<br/>skip URLs Layer 2 tried]
+    C --> B{web search_cache fresh?}
+    B -->|yes| H
+    B -->|no| D[Exa lifecycle search<br/>+ alias variants]
     D --> E{Enough URLs?}
     E -->|no| F[DDGS fallback]
-    E -->|yes| G[Save search_cache]
+    E -->|yes| G[Save web URLs to search_cache]
     F --> G
-    G --> H[Scrape URLs concurrent]
+    G --> H[Scrape URLs concurrent<br/>SSRF-checked, size-capped]
     H --> I[_score_page<br/>text + URL lifecycle score]
     I --> J[Top 5 pages → extract_from_content Gemini]
-    J --> K[calculate_confidence<br/>lifecycle_status, fields, domain]
+    J --> J2[Drop dates not found on page]
+    J2 --> K[calculate_confidence<br/>lifecycle_status, fields, official domain]
     K --> L{accept_as_found?}
     L -->|yes| M[Return QueryResult]
     L -->|no| N[Next page or Layer 4]

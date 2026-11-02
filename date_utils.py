@@ -96,3 +96,69 @@ def merge_date_fields(data: dict) -> dict:
         data["date_precision"] = "relative_only"
 
     return data
+
+
+# ─── Grounding: does an extracted date actually appear in the source text? ───
+
+_MONTH_NAMES = [
+    ("january", "jan"), ("february", "feb"), ("march", "mar"), ("april", "apr"),
+    ("may", "may"), ("june", "jun"), ("july", "jul"), ("august", "aug"),
+    ("september", "sept?"), ("october", "oct"), ("november", "nov"), ("december", "dec"),
+]
+
+_ISO_LIKE = re.compile(r"^\s*(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?\s*$")
+
+
+def date_grounding(date_str: Optional[str], text: str) -> str:
+    """
+    How well `date_str` (YYYY, YYYY-MM or YYYY-MM-DD) is supported by `text`:
+      "exact"   — the date (at its stated precision) appears in some common format
+      "partial" — the year appears, but not the month/day in a recognizable format
+      "absent"  — the year does not appear at all (date was not on the page)
+    """
+    if not date_str or not text:
+        return "absent"
+    m = _ISO_LIKE.match(str(date_str))
+    if not m:
+        return "absent"
+    year, month, day = m.group(1), m.group(2), m.group(3)
+    t = text.lower()
+    if not re.search(rf"(?<!\d){year}(?!\d)", t):
+        return "absent"
+    if not month:
+        return "exact"
+
+    mo = int(month)
+    if not 1 <= mo <= 12:
+        return "partial"
+    full, abbr = _MONTH_NAMES[mo - 1]
+    name = rf"(?:{full}|{abbr}\.?)"
+    mo_num = rf"0?{mo}"
+    sep = r"[-/.]"
+    ord_sfx = r"(?:st|nd|rd|th)?"
+
+    if day:
+        d = int(day)
+        d_num = rf"0?{d}"
+        patterns = [
+            rf"{year}{sep}{mo_num}{sep}{d_num}(?!\d)",                       # 2024-10-08, 2024/10/8
+            rf"(?<!\d){mo_num}{sep}{d_num}{sep}{year}",                      # 10/08/2024
+            rf"(?<!\d){d_num}{sep}{mo_num}{sep}{year}",                      # 08/10/2024, 08.10.2024
+            rf"\b{name}\s+{d_num}{ord_sfx},?\s+{year}",                      # October 8, 2024
+            rf"(?<!\d){d_num}{ord_sfx}\s+(?:of\s+)?{name},?\s+{year}",       # 8 October 2024
+            rf"(?<!\d){d_num}{sep}{name}{sep}{year}",                        # 08-Oct-2024
+        ]
+        if any(re.search(p, t) for p in patterns):
+            return "exact"
+        return "partial"
+
+    patterns = [
+        rf"{year}{sep}{mo_num}(?!\d)",                                       # 2024-10
+        rf"(?<!\d){mo_num}{sep}{year}",                                      # 10/2024
+        rf"\b{name}\s+(?:\d{{1,2}}{ord_sfx},?\s+)?{year}",                   # October 2024
+        rf"\b{name}{sep}{year}",                                             # Oct-2024
+        rf"(?<!\d)\d{{1,2}}{ord_sfx}\s+{name},?\s+{year}",                   # 8 October 2024
+    ]
+    if any(re.search(p, t) for p in patterns):
+        return "exact"
+    return "partial"

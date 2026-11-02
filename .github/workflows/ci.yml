@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        # crawl4ai pulls a headless browser stack the offline tests don't need
+        run: |
+          grep -v '^crawl4ai' requirements.txt > requirements-ci.txt
+          pip install -r requirements-ci.txt pyflakes pip-audit
+      - name: Lint (undefined names / unused imports)
+        run: python -m pyflakes *.py search/*.py sources/*.py tests/*.py | grep -v "f-string is missing placeholders" && exit 1 || exit 0
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Audit dependencies for known vulnerabilities
+        run: pip-audit -r requirements-ci.txt

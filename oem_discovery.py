@@ -14,7 +14,11 @@ from typing import Optional
 from urllib.parse import urlparse
 
 import db
+from domain_utils import host_in_domains, hostname, name_tokens, registrable_domain
 from search.providers import DuckDuckGoProvider, get_exa_provider
+
+# OEMs already auto-discovered in this process (avoid paying for discovery on every query/row)
+_DISCOVERY_ATTEMPTED: set[str] = set()
 
 # URL path/title signals for lifecycle documentation
 _LIFECYCLE_URL_PATTERNS = [
@@ -71,11 +75,14 @@ def _classify_hub_url(url: str) -> str:
     return "lifecycle"
 
 
+def _is_blocklisted(url_or_host: str) -> bool:
+    return host_in_domains(url_or_host, _BLOCKLIST_HOSTS)
+
+
 def _url_lifecycle_score(url: str, title: str = "") -> int:
     """Higher = more likely an official lifecycle hub page."""
     parsed = urlparse(url.lower())
-    host = parsed.netloc
-    if any(host == b or host.endswith("." + b) for b in _BLOCKLIST_HOSTS):
+    if _is_blocklisted(url):
         return -100
     path = parsed.path
     for pat in _SKIP_PATH_PATTERNS:
@@ -95,50 +102,40 @@ def _url_lifecycle_score(url: str, title: str = "") -> int:
 
 def _infer_domains_from_urls(urls: list[str], oem_name: str) -> list[str]:
     """
-    Build trusted domain list from discovered URLs (registrable + hostnames).
-    Prefer hosts that appear on multiple lifecycle-scored URLs.
+    Build the trusted domain list from search hits.
+
+    Only registrable domains whose label equals the OEM name (a word of it, all words joined,
+    or its initials) are trusted — search results are attacker-influenced (SEO spam, typosquats, wikis), and a
+    trusted domain gets full confidence in extraction scoring. Hostnames are added only
+    under an accepted registrable domain. If nothing matches, nothing is trusted.
     """
+    words = re.findall(r"[a-z0-9]+", oem_name.lower())
+    allowed_labels = set(name_tokens(oem_name)) | ({"".join(words)} if words else set())
+    allowed_labels.discard("")
+    if not allowed_labels:
+        return []
+
+    reg_counts: dict[str, int] = {}
     host_counts: dict[str, int] = {}
-    registrable_counts: dict[str, int] = {}
-
-    oem_tokens = [t for t in re.findall(r"[a-z0-9]+", oem_name.lower()) if len(t) > 2]
-
     for url in urls:
-        host = urlparse(url).netloc.lower()
-        if not host or host in _BLOCKLIST_HOSTS:
+        host = hostname(url)
+        if not host or _is_blocklisted(host):
             continue
         if host.startswith("www."):
             host = host[4:]
+        reg = registrable_domain(host)
+        label = reg.split(".", 1)[0].replace("-", "")
+        if label not in allowed_labels:
+            continue  # e.g. 'acme-eol.co.uk' is not 'acme' — possible typosquat
+        reg_counts[reg] = reg_counts.get(reg, 0) + 1
         host_counts[host] = host_counts.get(host, 0) + 1
 
-        parts = host.split(".")
-        if len(parts) >= 2:
-            reg = ".".join(parts[-2:])
-            if reg not in _BLOCKLIST_HOSTS:
-                registrable_counts[reg] = registrable_counts.get(reg, 0) + 1
-
-    ranked_reg = sorted(registrable_counts.items(), key=lambda x: -x[1])
-    ranked_host = sorted(host_counts.items(), key=lambda x: -x[1])
-
     domains: list[str] = []
-    seen: set[str] = set()
-
-    def add(d: str):
-        if d and d not in seen and d not in _BLOCKLIST_HOSTS:
-            seen.add(d)
-            domains.append(d)
-
-    for reg, count in ranked_reg[:5]:
-        if count >= 1 and any(tok in reg for tok in oem_tokens):
-            add(reg)
-    if not domains:
-        for reg, _ in ranked_reg[:3]:
-            add(reg)
-
-    for host, count in ranked_host[:8]:
-        if count >= 1:
-            add(host)
-
+    for reg, _count in sorted(reg_counts.items(), key=lambda x: -x[1])[:3]:
+        domains.append(reg)
+    for host, _count in sorted(host_counts.items(), key=lambda x: -x[1])[:8]:
+        if host not in domains and registrable_domain(host) in domains:
+            domains.append(host)
     return domains
 
 
@@ -211,10 +208,12 @@ def discover_oem_hubs(
         if score > 0:
             scored.append((score, url, title))
 
+    domains = _infer_domains_from_urls(all_urls, oem)
+    # Hubs must live on an inferred (vendor-named) domain — no third-party crawl seeds.
+    scored = [item for item in scored if host_in_domains(item[1], domains)]
     scored.sort(key=lambda x: x[0], reverse=True)
     hub_candidates = [url for _, url, _ in scored[:max_hubs]]
 
-    domains = _infer_domains_from_urls(all_urls, oem)
     if verbose:
         print(f"    Provider: {provider_used or 'none'}")
         print(f"    Search results: {len(search_hits)} URLs, {len(hub_candidates)} hub candidates")
@@ -314,6 +313,11 @@ def ensure_oem_ready(
 
     if not needs_discovery:
         return False
+
+    key = oem.strip().lower()
+    if key in _DISCOVERY_ATTEMPTED:
+        return False  # already tried in this run; don't re-pay for search on every query
+    _DISCOVERY_ATTEMPTED.add(key)
 
     if verbose:
         print(f"  [i] OEM '{oem}' not fully configured "
