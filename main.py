@@ -176,7 +176,7 @@ def _default_crawl_depth() -> int:
 def print_result(result: QueryResult):
     """Pretty-print a query result."""
     if not result.found:
-        print(f"\n  [NOT FOUND]")
+        print("\n  [NOT FOUND]")
         print(f"      Reason: {result.reason}")
         return
 
@@ -222,7 +222,7 @@ def print_stats():
     c = conn.cursor()
 
     print(f"\n{'=' * 60}")
-    print(f"  Database Statistics")
+    print("  Database Statistics")
     print(f"{'=' * 60}")
 
     # Hub URLs
@@ -244,13 +244,13 @@ def print_stats():
         for oem, total, success, types in discovered:
             print(f"    {oem:<25}: {total} URLs ({success or 0} scraped, {types} types)")
     else:
-        print(f"\n  Discovered URLs: 0 (run crawl first)")
+        print("\n  Discovered URLs: 0 (run crawl first)")
 
     # URL types breakdown
     c.execute("SELECT url_type, COUNT(*) FROM discovered_urls GROUP BY url_type ORDER BY COUNT(*) DESC")
     types = c.fetchall()
     if types:
-        print(f"\n  URL Types:")
+        print("\n  URL Types:")
         for url_type, count in types:
             print(f"    {url_type:<25}: {count}")
 
@@ -309,10 +309,10 @@ def discover_mode(oem: str, product: str = "", crawl: bool = False, depth: int =
 def interactive_mode():
     """Interactive query mode."""
     print(f"\n{'=' * 60}")
-    print(f"   Product Lifecycle Query Engine v2")
-    print(f"   Accuracy-first: null > hallucination")
+    print("   Product Lifecycle Query Engine v2")
+    print("   Accuracy-first: null > hallucination")
     print(f"{'=' * 60}")
-    print(f"   Type 'quit' to exit\n")
+    print("   Type 'quit' to exit\n")
 
     while True:
         try:
@@ -350,7 +350,7 @@ def batch_mode(input_file: str, output_file: str):
     prod_col = next((c for c in df.columns if c.lower() in ("product name", "product", "name")), None)
 
     if not pub_col or not prod_col:
-        print(f"  [X] Could not find Publisher/OEM and Product Name columns.")
+        print("  [X] Could not find Publisher/OEM and Product Name columns.")
         print(f"    Columns found: {list(df.columns)}")
         return
 

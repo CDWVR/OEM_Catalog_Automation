@@ -153,7 +153,7 @@ def _fetch_crawl4ai(url: str, max_chars: int = 12000) -> Optional[dict]:
                 result = await crawler.arun(url=url)
                 final_url = getattr(result, "redirected_url", None) or getattr(result, "url", None)
                 if result and final_url and final_url != url and not is_safe_url(final_url):
-                    print(f"    [Scraper:Crawl4AI] Redirected to unsafe URL — discarded")
+                    print("    [Scraper:Crawl4AI] Redirected to unsafe URL — discarded")
                     return None
                 if result and result.markdown:
                     text = result.markdown.strip()[:max_chars]
@@ -279,7 +279,7 @@ def _fetch_pdf(url: str, max_chars: int = 12000) -> Optional[dict]:
         from pypdf import PdfReader
         import io
     except ImportError:
-        print(f"    [Scraper:PDF] pypdf not installed. Run: pip install pypdf")
+        print("    [Scraper:PDF] pypdf not installed. Run: pip install pypdf")
         return None
 
     try:
@@ -306,7 +306,7 @@ def _fetch_pdf(url: str, max_chars: int = 12000) -> Optional[dict]:
 
         text = "\n".join(text_parts).strip()
         if not text or len(text) < 50:
-            print(f"    [Scraper:PDF] No readable text in PDF")
+            print("    [Scraper:PDF] No readable text in PDF")
             return None
 
         text = text[:max_chars]
@@ -345,12 +345,12 @@ def _fetch_csv(url: str, max_chars: int = 12000) -> Optional[dict]:
             except UnicodeDecodeError:
                 text = ""
         else:
-            print(f"    [Scraper:CSV] Could not decode response")
+            print("    [Scraper:CSV] Could not decode response")
             return None
 
         text = text.strip()
         if len(text) < 30:
-            print(f"    [Scraper:CSV] Empty or too small")
+            print("    [Scraper:CSV] Empty or too small")
             return None
 
         text = text[:max_chars]

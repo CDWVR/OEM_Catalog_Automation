@@ -489,13 +489,13 @@ def extract_from_content(
                         try:
                             raw = _generate(MODEL_FALLBACK_CHAIN[0])
                         except Exception:
-                            print(f"    [Extractor] Final retry failed. Skipping.")
+                            print("    [Extractor] Final retry failed. Skipping.")
                 else:
                     # Network/SSL/other error — try next model, don't crash
                     if remaining > 0:
                         print(f"    [Extractor] {model_name.split('/')[-1]} error -> next model ({remaining} left)")
                     else:
-                        print(f"    [Extractor] All models failed.")
+                        print("    [Extractor] All models failed.")
 
         if raw is None:
             return None
