@@ -10,7 +10,7 @@ pandas>=2.0.0
 google-genai>=1.0.0
 
 # Web search (Layer 3 — primary: Exa; fallback: ddgs)
-exa-py>=1.0.0
+exa-py>=2.26.0
 ddgs>=7.0.0
 
 # Optional: Advanced scraping (headless browser)
